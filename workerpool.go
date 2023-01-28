@@ -95,7 +95,6 @@ func (w *WorkerPool) AddTask(ctx context.Context, fn func()) error {
 
 			if submitted {
 				go w.worker(fn)
-
 				close(done)
 				break
 			}
@@ -106,7 +105,6 @@ func (w *WorkerPool) AddTask(ctx context.Context, fn func()) error {
 		select {
 		case <-ctx.Done():
 			atomic.StoreInt32(&stop, 1)
-			return ctx.Err()
 		case err := <-done:
 			return err
 		}
@@ -174,7 +172,7 @@ func (w *WorkerPool) Stop(ctx context.Context) error {
 			log.Println("workerPool: Stop: terminate successfully")
 			return nil
 		case <-ctx.Done():
-			log.Println(ctx.Err().Error())
+			log.Printf("workerPool: Stop: %v", ctx.Err().Error())
 			return ctx.Err()
 		default:
 		}

@@ -1,4 +1,4 @@
-package workerpool_test
+package workerpool
 
 import (
 	"context"
@@ -9,15 +9,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"workerpool"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func TestWorkerpool_NewWorkerPool(t *testing.T) {
 	size := int32(5)
-	pool := workerpool.NewWorkerPool(size)
+	pool := NewWorkerPool(size)
 
 	assert.NotNil(t, pool)
 	assert.Equal(t, size, pool.MaxWorkers)
@@ -27,7 +27,7 @@ func TestWorkerpool_NewWorkerPool(t *testing.T) {
 func TestWorkerpool_NewWorkerPool_withOptions(t *testing.T) {
 	size := int32(5)
 	h := func(interface{}) {}
-	pool := workerpool.NewWorkerPool(size, workerpool.PanicHandler(h))
+	pool := NewWorkerPool(size, PanicHandler(h))
 
 	assert.NotNil(t, pool)
 	assert.Equal(t, size, pool.MaxWorkers)
@@ -39,13 +39,15 @@ func TestWorkerpool_NewWorkerPool_withOptions(t *testing.T) {
 
 func TestWorkerpool_NewWorkerPool_invalidInput(t *testing.T) {
 	defaultSize := int32(runtime.NumCPU() * 4)
-	pool := workerpool.NewWorkerPool(-5)
+	pool := NewWorkerPool(-5)
 
 	assert.NotNil(t, pool)
 	assert.Equal(t, defaultSize, pool.MaxWorkers)
 }
 
 func TestWorkerpool_AddTask(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -61,54 +63,72 @@ func TestWorkerpool_AddTask(t *testing.T) {
 }
 
 func TestWorkerpool_AddTask_cancelByContext(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	task := func() { time.Sleep(10 * time.Second) }
-
-	pool := NewWorkerpool(t, 1)
-	pool.AddTask(ctx, task)
+	signal := make(chan struct{})
+	task := func() { <-signal }
 
 	var err error
+	pool := NewWorkerpool(t, 1)
+
+	// 1st AddTask
+	pool.AddTask(ctx, task)
 
 	done := make(chan struct{})
 
+	// 2nd AddTask
 	go func() {
 		defer close(done)
 		err = pool.AddTask(ctx, task)
 	}()
 
+	// cancel context to interrupt 2nd AddTask
 	cancel()
+
+	// wait for 2nd Task return
 	<-done
 
-	assert.Equal(t, ctx.Err(), err)
+	// signal 1st Task to complete
+	close(signal)
+
+	// stop the pool
+	pool.Stop(context.Background())
+
+	assert.Equal(t, ErrContextInterrupt, err)
 }
 
 func TestWorkerpool_AddTask_addTaskAfterPoolClose(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool := NewWorkerpool(t, 5)
+	pool := NewWorkerpool(t, 1)
 
-	for i := 0; i < 5; i++ {
-		pool.AddTask(ctx, func() {
-			time.Sleep(10 * time.Second)
-		})
-	}
+	signal := make(chan error)
 
 	done := make(chan error)
 
 	go func() {
+		<-signal
+		fmt.Println("signal")
 		done <- pool.AddTask(ctx, func() {})
 	}()
 
-	go pool.Stop(ctx)
+	pool.Stop(ctx)
+
+	close(signal)
 
 	submitted := <-done
 
-	assert.Equal(t, submitted, workerpool.ErrPoolClosed)
+	assert.Equal(t, submitted, ErrPoolClosed)
 }
 
 func TestWorkerpool_AddTask_tasksExceedsPoolSize(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -136,7 +156,7 @@ func TestWorkerpool_executeTask_panicHandle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool := workerpool.NewWorkerPool(5)
+	pool := NewWorkerPool(5)
 	err := pool.AddTask(ctx, func() { panic("test panic") })
 	pool.WaitForTaskCompleted()
 
@@ -151,7 +171,7 @@ func TestWorkerpool_executeTask_customPanicHandle(t *testing.T) {
 
 	h := func(interface{}) { done = true }
 
-	pool := workerpool.NewWorkerPool(5, workerpool.PanicHandler(h))
+	pool := NewWorkerPool(5, PanicHandler(h))
 	pool.AddTask(ctx, func() { panic("test panic") })
 	pool.WaitForTaskCompleted()
 
@@ -196,19 +216,21 @@ func TestWorkerpool_Stop(t *testing.T) {
 
 		for i := 0; i < 5; i++ {
 			pool.AddTask(ctx, func() {
+				time.Sleep(1 * time.Second)
 				atomic.AddInt32(&doneCount, 1)
 			})
 		}
 
-		err := pool.Stop(ctx)
+		var err error
+		err = pool.Stop(context.Background())
 
 		assert.NoError(t, err)
 		assert.Equal(t, doneCount, int32(5), fmt.Sprintf("should have increment count %d", 5))
 	})
 }
 
-func NewWorkerpool(t *testing.T, size int32) *workerpool.WorkerPool {
-	pool := workerpool.NewWorkerPool(size)
+func NewWorkerpool(t *testing.T, size int32) *WorkerPool {
+	pool := NewWorkerPool(size)
 	require.NotNil(t, pool)
 	return pool
 }
